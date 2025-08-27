@@ -1,0 +1,141 @@
+'use client';
+
+import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useAccount, useSwitchChain, useWriteContract, useReadContract } from 'wagmi';
+import { baseSepolia } from 'viem/chains';
+import { toHex } from 'viem';
+import { useEffect, useState } from 'react';
+import { MULTIVAULT_ABI, MULTIVAULT_ADDRESS, GRAPHQL_URL } from '@/lib/config';
+
+type PinThingInput = { name: string; description?: string; image?: string; url?: string };
+
+async function pinMetadata(thing: PinThingInput): Promise<string> {
+  const response = await fetch(process.env.NEXT_PUBLIC_INTUITION_GRAPHQL_URL ?? GRAPHQL_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: `mutation IntuitionPinMetadata($thing: PinThingInput!) {
+        pinThing(thing: $thing) { uri }
+      }`,
+      variables: { thing }
+    })
+  });
+  const result = await response.json();
+  return result?.data?.pinThing?.uri;
+}
+
+export default function Page() {
+  const { address, chainId, isConnected } = useAccount();
+  const { switchChain } = useSwitchChain();
+  const [score, setScore] = useState(0);
+  const [name, setName] = useState('Tap Hero');
+  const [status, setStatus] = useState<string | null>(null);
+  const [txHash, setTxHash] = useState<string | null>(null);
+
+  // Reads
+  const { data: atomCost } = useReadContract({
+    address: MULTIVAULT_ADDRESS,
+    abi: MULTIVAULT_ABI,
+    functionName: 'getAtomCost',
+    chainId: baseSepolia.id
+  });
+
+  const needSwitch = isConnected && chainId !== baseSepolia.id;
+
+  const { writeContractAsync } = useWriteContract();
+
+  useEffect(() => {
+    if (score < 0) setScore(0);
+  }, [score]);
+
+  const handleTap = () => setScore((s) => s + 1);
+
+  async function handleCreateAtom() {
+    try {
+      setStatus('Metadata pinleniyor...');
+      const uri = await pinMetadata({
+        name: `${name} - Skor ${score}`,
+        description: 'Intuition Testnet TapGame skoru',
+        url: 'https://vercel.com/'
+      });
+      if (!uri) throw new Error('URI elde edilemedi');
+
+      setStatus('Zincir maliyeti alınıyor...');
+      const value = typeof atomCost === 'bigint' ? atomCost : BigInt(0);
+
+      setStatus('createAtom çağrılıyor... Cüzdanda onaylayın.');
+      const hash = await writeContractAsync({
+        address: MULTIVAULT_ADDRESS,
+        abi: MULTIVAULT_ABI,
+        chainId: baseSepolia.id,
+        functionName: 'createAtom',
+        args: [toHex(uri)],
+        value
+      });
+
+      setTxHash(hash as `0x${string}`);
+      setStatus('Gönderildi. On-chain onayı bekleyin.');
+    } catch (e: any) {
+      console.error(e);
+      setStatus(`Hata: ${e?.message ?? e}`);
+    }
+  }
+
+  return (
+    <main className="container">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1>Intuition TapGame (Testnet)</h1>
+        <ConnectButton />
+      </div>
+
+      <div className="card center" style={{ gap: 16 }}>
+        <div className="row">
+          <span className="badge">Ağ: Base Sepolia</span>
+          <span className="badge">Sözleşme: {String(MULTIVAULT_ADDRESS).slice(0,8)}…</span>
+          {atomCost !== undefined && <span className="badge">Atom Ücret: {String(atomCost)} wei</span>}
+        </div>
+
+        <div
+          className="tap"
+          role="button"
+          aria-label="Tap to score"
+          onClick={handleTap}
+          onTouchStart={handleTap}
+        >
+          {score}
+        </div>
+
+        <input
+          className="input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="İsminizi/lakabınızı girin"
+        />
+
+        {needSwitch ? (
+          <button
+            className="primary"
+            onClick={() => switchChain?.({ chainId: baseSepolia.id })}
+          >
+            Base Sepolia'ya Geç
+          </button>
+        ) : (
+          <button className="primary" disabled={!isConnected || !atomCost} onClick={handleCreateAtom}>
+            Skorumu Atom Olarak Kaydet
+          </button>
+        )}
+
+        {status && <div className="small">{status}</div>}
+        {txHash && (
+          <a className="small success" target="_blank" href={`https://sepolia.basescan.org/tx/${txHash}`}>
+            İşlemi explorer'da görüntüle →
+          </a>
+        )}
+      </div>
+
+      <p className="footer small">
+        Testnet içindir. Önce Base Sepolia musluğundan ETH alın ve küçük miktarda ücret ödeyin.
+      </p>
+    </main>
+  );
+}
